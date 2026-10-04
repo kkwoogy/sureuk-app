@@ -3,21 +3,25 @@
   const chips = document.getElementById("chips");
   const counter = document.getElementById("counter");
   const progress = document.getElementById("progress");
-  const who = document.getElementById("who");
+  const menuBtn = document.getElementById("who");
 
   const FEEDBACK_KEY = "sureuk.feedback";
   const KEY_STORE = "sureuk.key";
   const CODE_STORE = "sureuk.code"; // 이 기기 사용자의 코드 (= data/<코드>.json)
   const DRAFT_STORE = "sureuk.draft";
+  const SUBMIT_STORE = "sureuk.submitted"; // 관심사를 보낸 시각 (이보다 새 기사가 올라오면 준비 완료)
 
   let mode = "plain"; // PC 미리보기: 잠그지 않은 data/*.json, 올린 페이지: 잠근 data/*.enc.json
   let rawKey = null;
   let code = null;
-  let data = null; // 지금 보여주는 카드 (내 카드, 또는 준비 중일 때 공용 주요 뉴스)
+  let config = null; // 사이트에서 관심사를 바로 보낼 때 쓰는 GitHub 정보 (잠근 config)
+  let data = null; // 지금 보여주는 지면 (내 신문, 또는 준비 중일 때 공용 주요 뉴스)
   let pending = false;
-  let config = null; // 잠근 config: 사이트에서 관심사를 바로 보낼 때 쓰는 GitHub 정보
   let filter = "all";
   let observer = null;
+  let mastObserver = null;
+  let waitTimer = null;
+  const topBar = document.querySelector(".top");
 
   // ── 저장소 (사생활 모드 등에서 실패해도 앱은 그대로 동작) ──
   const store = {
@@ -36,11 +40,10 @@
     for (const [k, v] of Object.entries(attrs)) {
       if (v == null || v === false) continue;
       if (k === "class") node.className = v;
-      else if (k === "style") node.style.cssText = v;
       else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
       else node.setAttribute(k, v === true ? "" : v);
     }
-    for (const c of children.flat()) {
+    for (const c of children.flat(Infinity)) {
       if (c == null || c === false) continue;
       node.append(c instanceof Node ? c : document.createTextNode(String(c)));
     }
@@ -50,25 +53,14 @@
   const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : null);
   const external = (href, attrs, ...children) =>
     el("a", { href, target: "_blank", rel: "noopener noreferrer", ...attrs }, ...children);
-
-  function hue(id) {
-    let h = 0;
-    for (const ch of id) h = (h * 31 + ch.codePointAt(0)) % 360;
-    return h;
-  }
-
-  const topicOf = (id) => data.topics.find((t) => t.id === id) || { id, name: id, emoji: "•" };
+  const topicOf = (id) => data.topics.find((t) => t.id === id) || { id, name: id };
 
   function daysAgo(isoDate) {
     if (!isoDate) return null;
     const [y, m, d] = isoDate.split("-").map(Number);
-    const then = new Date(y, m - 1, d);
     const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const diff = Math.round((today - then) / 86400000);
-    if (diff <= 0) return "오늘";
-    if (diff === 1) return "어제";
-    return `${diff}일 전`;
+    const diff = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()) - new Date(y, m - 1, d)) / 86400000);
+    return diff <= 0 ? "오늘" : diff === 1 ? "어제" : `${diff}일 전`;
   }
 
   function readMinutes(card) {
@@ -76,7 +68,18 @@
     return Math.max(1, Math.round(text.length / 450));
   }
 
-  // 화면 전체를 패널(잠금·사람 고르기·관심사 등록)로 바꿀 때
+  function longDate(iso) {
+    const d = new Date(iso);
+    return isNaN(d) ? "" : d.toLocaleDateString("ko-KR", { year: "numeric", month: "long", day: "numeric", weekday: "long" });
+  }
+
+  function masthead(sub) {
+    return el("header", { class: "masthead" },
+      el("h1", { class: "mast-title" }, "The SLR"),
+      el("p", { class: "mast-sub" }, sub || "스르륵 읽는 나만의 신문"));
+  }
+
+  // 화면 전체를 패널(잠금·구독·메뉴)로 바꿀 때
   function showPanel(...children) {
     observer?.disconnect();
     chips.replaceChildren();
@@ -84,31 +87,26 @@
     progress.style.width = "0";
     feed.replaceChildren(el("section", { class: "panel" }, ...children));
     window.scrollTo({ top: 0 });
+    mastObserver?.disconnect();
+    topBar.classList.toggle("mast-visible", Boolean(feed.querySelector(".mast-title")));
   }
 
-  // ── 카드 조각 ──
-  function illustration(card, topic) {
-    const label = card.kind === "series" && card.episode ? `${topic.name} · 연재 ${card.episode}편` : topic.name;
-    return el("div", { class: "illus", style: `--h:${hue(topic.id)}` },
-      el("span", { class: "illus-emoji", "aria-hidden": "true" }, topic.emoji),
-      el("span", { class: "illus-label" }, label),
-    );
-  }
-
-  function hero(card, topic, url) {
+  // ── 기사 조각 ──
+  function figure(card, url, credit) {
     const image = safeUrl(card.image);
-    if (!image) return el("div", { class: "hero" }, illustration(card, topic));
+    if (!image) return null;
     const img = el("img", { src: image, alt: "", loading: "lazy", decoding: "async", referrerpolicy: "no-referrer" });
-    const box = url ? external(url, { class: "hero", "aria-label": "원문 기사 열기" }, img) : el("div", { class: "hero" }, img);
-    // 이미지가 막혀 있거나 깨지면 주제 그림으로 바꾼다
-    img.addEventListener("error", () => box.replaceChildren(illustration(card, topic)), { once: true });
-    return box;
+    const fig = el("figure", { class: "figure" },
+      url ? external(url, { "aria-label": "원문 기사 열기" }, img) : img,
+      credit ? el("figcaption", {}, `사진 · ${credit}`) : null);
+    img.addEventListener("error", () => fig.remove(), { once: true }); // 막힌 사진은 그냥 뺀다
+    return fig;
   }
 
-  function numbers(card) {
+  function figures(card) {
     if (!card.numbers?.length) return null;
-    return el("div", { class: "numbers" }, card.numbers.map((n) =>
-      el("div", { class: "num" }, el("span", { class: "num-value" }, n.value), el("span", { class: "num-label" }, n.label))));
+    return el("div", { class: "figures" }, card.numbers.map((n) =>
+      el("div", { class: "fig" }, el("span", { class: "fig-value" }, n.value), el("span", { class: "fig-label" }, n.label))));
   }
 
   function table(card) {
@@ -125,15 +123,15 @@
     if (!card.term) return null;
     const i = card.term.indexOf(":");
     return i > 0
-      ? el("aside", { class: "term" }, el("b", {}, `용어 풀이 · ${card.term.slice(0, i).trim()}`), card.term.slice(i + 1).trim())
+      ? el("aside", { class: "term" }, el("b", {}, `용어 풀이 — ${card.term.slice(0, i).trim()}`), card.term.slice(i + 1).trim())
       : el("aside", { class: "term" }, el("b", {}, "용어 풀이"), card.term);
   }
 
   function feedbackButtons(card) {
     const vote = feedback[card.id] || 0;
     const group = el("div", { class: "fb-group" });
-    const make = (value, label, aria) => el("button", {
-      class: "fb", type: "button", "aria-pressed": String(vote === value), "aria-label": aria,
+    const make = (value, label) => el("button", {
+      class: "fb", type: "button", "aria-pressed": String(vote === value),
       onclick: () => {
         feedback[card.id] = feedback[card.id] === value ? 0 : value;
         store.set(FEEDBACK_KEY, feedback);
@@ -142,113 +140,111 @@
         down.setAttribute("aria-pressed", String(feedback[card.id] === -1));
       },
     }, label);
-    group.append(make(1, "👍", "유용해요"), make(-1, "👎", "별로예요"));
+    group.append(make(1, "유익해요"), make(-1, "관심 없어요"));
     return group;
   }
 
-  function renderCard(card, i) {
+  function renderStory(card, i, lead) {
     const topic = topicOf(card.topic);
     const isSeries = card.kind === "series";
     const sources = (card.sources || []).filter((s) => safeUrl(s.url));
     const main = sources[0];
     const when = daysAgo(main?.date);
 
-    const meta = el("div", { class: "meta" },
-      el("span", { class: "topic", style: `--h:${hue(topic.id)}` }, `${topic.emoji} ${topic.name}`),
-      isSeries && card.episode ? el("span", { class: "badge" }, `연재 ${card.episode}편`) : null,
-      card.ad_suspect ? el("span", { class: "badge warn" }, "홍보성 섞임") : null,
-      main ? el("span", {}, main.publisher) : null,
-      when ? el("span", {}, `· ${when}`) : null,
-      el("span", {}, `· ${readMinutes(card)}분`),
-    );
+    // 섹션 제목과 겹치는 이름은 빼고 (주요 뉴스, 주제별 보기)
+    const showTopic = filter === "all" && card.kind !== "headline";
+    const kicker = el("p", { class: "kicker" },
+      showTopic ? el("span", {}, topic.name) : null,
+      isSeries && card.episode ? el("span", {}, `연재 ${card.episode}회`) : null,
+      card.ad_suspect ? el("span", { class: "warn" }, "홍보성 주의") : null);
 
-    const sections = (card.sections || []).map((s) =>
-      el("section", { class: "sec" }, el("h3", {}, s.title), el("p", {}, s.text)));
+    const byline = el("p", { class: "byline" },
+      main ? el("b", {}, main.publisher) : el("b", {}, "The SLR"),
+      when ? ` · ${when}` : "",
+      ` · ${readMinutes(card)}분 읽기`);
+
+    const body = el("div", { class: "body" }, (card.sections || []).map((s) => [el("h3", {}, s.title), el("p", {}, s.text)]));
     const steps = card.steps?.length ? el("ol", { class: "steps" }, card.steps.map((s) => el("li", {}, s))) : null;
-    const cta = main
-      ? external(main.url, { class: "cta" }, isSeries ? "참고 기사 보기" : "원문 기사 보기", el("span", {}, `${main.publisher} ↗`))
-      : null;
+    const read = main ? external(main.url, { class: "read" }, isSeries ? `참고 기사 읽기 — ${main.publisher} →` : `원문 기사 읽기 — ${main.publisher} →`) : null;
     const others = sources.slice(1);
     const also = others.length
       ? el("div", { class: "also" }, isSeries ? "참고 · " : "같은 소식 · ",
           others.flatMap((s, n) => [n ? " · " : null, external(s.url, { title: s.title }, s.publisher)]))
       : el("div", { class: "also" }, isSeries ? "기초 지식 연재 · 바뀌는 조건은 꼭 다시 확인하세요" : "");
 
-    return el("article", { class: "story", "data-index": i },
-      hero(card, topic, main?.url),
-      el("div", { class: "story-body" },
-        meta,
-        el("h2", {}, card.headline),
-        card.summary ? el("p", { class: "lead" }, card.summary) : null,
-        numbers(card),
-        sections,
-        steps,
-        table(card),
-        term(card),
-        cta,
-        el("div", { class: "foot" }, also, feedbackButtons(card)),
-      ),
+    return el("article", { class: `story${lead ? " lead" : ""}`, "data-index": i },
+      kicker.childElementCount ? kicker : null,
+      el("h2", {}, card.headline),
+      card.summary ? el("p", { class: "deck" }, card.summary) : null,
+      figure(card, main?.url, main?.publisher),
+      byline,
+      body,
+      figures(card),
+      steps,
+      table(card),
+      term(card),
+      read,
+      el("div", { class: "foot" }, also, feedbackButtons(card)),
     );
   }
 
-  function renderIntro(cards) {
-    const d = new Date(data.generated_at);
-    const date = isNaN(d) ? "" : d.toLocaleDateString("ko-KR", { month: "long", day: "numeric", weekday: "long" });
+  function renderMasthead(cards) {
     const minutes = cards.reduce((sum, c) => sum + readMinutes(c), 0);
     const s = data.stats || {};
-    const title = filter !== "all" ? `${topicOf(filter).emoji} ${topicOf(filter).name}` : "오늘의 스르륵";
-    return el("section", { class: "intro" },
-      el("p", { class: "intro-date" }, date),
-      el("h1", {}, title),
-      el("p", { class: "intro-sub" },
-        el("span", { class: "pill" }, `카드 ${cards.length}장`),
-        el("span", { class: "pill" }, `약 ${minutes}분`)),
+    const waiting = store.get(SUBMIT_STORE, null);
+    return el("section", {},
+      masthead(),
+      el("div", { class: "dateline" }, el("span", {}, longDate(data.generated_at)), el("span", {}, `기사 ${cards.length} · 약 ${minutes}분`)),
       pending
-        ? el("p", { class: "notice" }, store.get(SUBMIT_STORE, null)
-          ? "⏳ 내 카드를 만들고 있어요. 몇 분 뒤 이 화면이 저절로 내 카드로 바뀌어요. 그동안 오늘의 주요 뉴스를 먼저 읽어보세요."
-          : "⏳ 아직 내 카드가 없어요. 위쪽 버튼에서 관심사를 보내면 만들어져요. 그동안 오늘의 주요 뉴스를 읽어보세요.")
-        : filter === "all"
-          ? el("p", { class: "intro-note" }, `기사 ${s.candidates ?? "?"}개 중에서 골랐고, 광고·협찬 의심 ${s.ads_filtered ?? 0}개는 걸렀어요.`)
-          : null,
+        ? el("p", { class: "notice" }, waiting
+          ? "지금 내 신문을 찍고 있어요. 몇 분 뒤 이 지면이 저절로 내 신문으로 바뀌어요. 그동안 오늘의 주요 뉴스를 먼저 읽어보세요."
+          : "아직 내 신문이 없어요. 위 메뉴에서 관심사를 보내면 만들어져요. 그동안 오늘의 주요 뉴스를 읽어보세요.")
+        : el("p", { class: "edition-note" }, `기사 ${s.candidates ?? "?"}건을 살펴 골랐고, 광고·협찬 의심 ${s.ads_filtered ?? 0}건은 걸렀습니다.`),
     );
+  }
+
+  function sectionHead(title, note) {
+    return el("h2", { class: "section-head" }, el("span", {}, title), el("span", {}, note || ""));
   }
 
   function renderEnd() {
     return el("section", { class: "end" },
-      el("h2", {}, "오늘 카드는 여기까지예요"),
-      el("p", {}, "다음 업데이트 때 새 카드가 올라와요."),
-      el("button", { class: "again", type: "button", onclick: () => window.scrollTo({ top: 0, behavior: "smooth" }) }, "처음으로"),
+      el("div", { class: "ornament", "aria-hidden": "true" }, "* * *"),
+      el("p", {}, "오늘 신문은 여기까지입니다. 다음 판에서 만나요."),
+      el("button", { class: "link-btn", type: "button", onclick: () => window.scrollTo({ top: 0, behavior: "smooth" }) }, "1면으로"),
     );
   }
 
-  function renderChips() {
+  function renderSections() {
     const make = (id, label) => el("button", {
-      class: "chip-btn", type: "button", "aria-pressed": String(filter === id),
+      class: "section-btn", type: "button", "aria-pressed": String(filter === id),
       onclick: () => {
         filter = id;
-        renderChips();
+        renderSections();
         renderFeed();
         chips.querySelector('[aria-pressed="true"]')?.scrollIntoView({ inline: "center", block: "nearest" });
       },
     }, label);
-    chips.replaceChildren(make("all", "전체"), ...data.topics.map((t) => make(t.id, `${t.emoji} ${t.name}`)));
+    chips.replaceChildren(make("all", "1면"), ...data.topics.map((t) => make(t.id, t.name)));
   }
 
   function renderFeed() {
     const cards = data.cards.filter((c) => filter === "all" || c.topic === filter);
     const items = [];
     cards.forEach((card, i) => {
-      // 전체 보기에서는 주요 뉴스와 관심사 카드 사이에 제목을 넣는다
       const prev = cards[i - 1];
-      if (filter === "all" && card.kind === "headline" && !prev) items.push(el("h2", { class: "section-title" }, "🗞️ 오늘 꼭 알아둘 뉴스"));
-      if (filter === "all" && card.kind !== "headline" && prev?.kind === "headline") {
-        items.push(el("h2", { class: "section-title" }, "✨ 내 관심사"));
-      }
-      items.push(renderCard(card, i));
+      if (filter === "all" && card.kind === "headline" && !prev) items.push(sectionHead("오늘의 주요 뉴스", "모두에게"));
+      if (filter === "all" && card.kind !== "headline" && (!prev || prev.kind === "headline")) items.push(sectionHead("나를 위한 지면", "관심사 기준"));
+      if (filter !== "all" && !prev) items.push(sectionHead(topicOf(filter).name, `기사 ${cards.length}`));
+      items.push(renderStory(card, i, i === 0));
     });
-    feed.replaceChildren(renderIntro(cards), ...items, renderEnd());
+    feed.replaceChildren(renderMasthead(cards), ...items, renderEnd());
     window.scrollTo({ top: 0 });
     watch(cards.length);
+    // 큰 제호가 보이는 동안은 위쪽 작은 제호를 숨긴다
+    mastObserver?.disconnect();
+    mastObserver = new IntersectionObserver(([e]) => topBar.classList.toggle("mast-visible", e.isIntersecting));
+    mastObserver.observe(feed.querySelector(".mast-title"));
   }
 
   function watch(total) {
@@ -303,13 +299,13 @@
   }
 
   function showUnlock(envelope) {
-    who.hidden = true;
+    menuBtn.hidden = true;
     const input = el("input", {
-      class: "field center", type: "password", placeholder: "비밀번호", "aria-label": "비밀번호",
+      class: "field pin", type: "password", inputmode: "numeric", placeholder: "····", "aria-label": "비밀번호",
       autocomplete: "current-password", autocapitalize: "off", spellcheck: "false",
     });
-    const msg = el("p", { class: "panel-note" }, "초대받은 사람만 보는 카드예요. 이 기기에서 처음 한 번만 비밀번호를 입력하면 돼요. 띄어쓰기는 상관없어요.");
-    const button = el("button", { class: "again", type: "submit" }, "열기");
+    const msg = el("p", { class: "panel-note" }, "구독자 전용 지면입니다. 이 기기에서 처음 한 번만 비밀번호를 입력하세요.");
+    const button = el("button", { class: "btn", type: "submit" }, "펼치기");
     const form = el("form", {
       class: "stack center",
       onsubmit: async (e) => {
@@ -328,20 +324,19 @@
           input.select();
         }
       },
-    }, el("div", { class: "lock", "aria-hidden": "true" }, "🔒"), el("h2", {}, "스르륵"), msg, input, button);
+    }, masthead(), msg, input, button);
     showPanel(form);
     input.focus();
   }
 
-  // ── 내 카드 열기: 코드가 없으면 관심사부터, 카드가 아직 없으면 공용 주요 뉴스 ──
+  // ── 내 신문 열기: 코드가 없으면 구독 신청부터, 아직 없으면 공용 주요 뉴스 ──
   function newCode() {
     const letters = "abcdefghjkmnpqrstuvwxyz23456789"; // 헷갈리는 글자(i, l, o, 0, 1) 제외
-    const bytes = crypto.getRandomValues(new Uint8Array(5));
-    return Array.from(bytes, (b) => letters[b % letters.length]).join("");
+    return Array.from(crypto.getRandomValues(new Uint8Array(5)), (b) => letters[b % letters.length]).join("");
   }
 
   async function route() {
-    config = await loadData("config").catch(() => null); // 사이트에서 바로 보내기용 (없으면 카톡 공유)
+    config = await loadData("config").catch(() => null);
     code = store.get(CODE_STORE, null);
     if (code) openFeed();
     else showInterestForm(false);
@@ -349,120 +344,110 @@
 
   async function openFeed() {
     stopWaiting();
-    showPanel(el("p", { class: "panel-note" }, "카드를 불러오는 중…"));
+    showPanel(el("p", { class: "panel-note" }, "지면을 펼치는 중…"));
     const waiting = Boolean(store.get(SUBMIT_STORE, null));
     data = await loadData(code, waiting).catch(() => null);
     pending = !data?.cards?.length;
     if (pending) data = await loadData("headlines").catch(() => null);
-    who.hidden = false;
-    who.textContent = pending ? "⏳ 준비 중 ▾" : "내 카드 ▾";
-    // 관심사를 보낸 뒤라면 새 카드가 올라오는지 뒤에서 계속 확인한다
-    if (waiting) startWaiting(openFeed);
+    menuBtn.hidden = false;
+    if (waiting) startWaiting(openFeed); // 관심사를 보낸 뒤라면 새 지면이 올라오는지 뒤에서 확인
     if (!data?.cards?.length) {
-      showPanel(
-        el("h1", { class: "panel-title" }, "카드를 준비하고 있어요"),
-        el("p", { class: "panel-note" }, "조금 뒤에 여기에 내 카드가 생겨요."),
-        el("button", { class: "ghost", type: "button", onclick: showMenu }, "관심사 고치기 · 코드 보기"),
-      );
+      showPanel(masthead(), el("p", { class: "panel-note" }, "아직 오늘 지면이 없어요. 조금 뒤에 다시 열어주세요."));
       return;
     }
     filter = "all";
-    renderChips();
+    renderSections();
     renderFeed();
   }
 
   function showMenu() {
-    who.hidden = true;
+    menuBtn.hidden = true;
+    stopWaiting();
     const codeInput = el("input", {
-      class: "field", type: "text", placeholder: "받은 코드 입력", "aria-label": "코드",
+      class: "field", type: "text", placeholder: "코드", "aria-label": "코드",
       autocapitalize: "off", autocomplete: "off", spellcheck: "false",
     });
     showPanel(
-      el("h1", { class: "panel-title" }, pending ? "⏳ 카드 준비 중" : "내 카드"),
-      el("div", { class: "stack" },
-        el("button", { class: "ghost", type: "button", onclick: () => showInterestForm(true) }, "✏️ 내 관심사 고치기"),
-        el("p", { class: "code-line" }, "내 코드 ", el("b", {}, code || "-"), " · 관심사를 보낼 때 같이 가요"),
-        el("p", { class: "label" }, "다른 기기에서 쓰던 코드가 있다면"),
-        el("form", {
-          class: "row",
-          onsubmit: (e) => {
-            e.preventDefault();
-            const value = codeInput.value.trim().toLowerCase();
-            if (!value) return;
-            store.set(CODE_STORE, value);
-            code = value;
-            openFeed();
-          },
-        }, codeInput, el("button", { class: "again", type: "submit" }, "열기")),
-        el("button", { class: "again wide", type: "button", onclick: openFeed }, "카드로 돌아가기"),
+      el("h1", { class: "panel-title" }, "메뉴"),
+      el("div", { class: "menu-list" },
+        el("button", { class: "menu-item", type: "button", onclick: openFeed }, pending ? "주요 뉴스로 돌아가기" : "내 신문으로 돌아가기"),
+        el("button", { class: "menu-item", type: "button", onclick: () => showInterestForm(true) }, "관심사 고치기"),
       ),
+      el("p", { class: "code-line" }, "내 코드 ", el("b", {}, code || "—")),
+      el("p", { class: "label" }, "다른 기기에서 쓰던 코드로 열기"),
+      el("form", {
+        class: "row",
+        onsubmit: (e) => {
+          e.preventDefault();
+          const value = codeInput.value.trim().toLowerCase();
+          if (!value) return;
+          store.set(CODE_STORE, value);
+          code = value;
+          openFeed();
+        },
+      }, codeInput, el("button", { class: "btn", type: "submit" }, "열기")),
     );
   }
-  who.addEventListener("click", showMenu);
+  menuBtn.addEventListener("click", showMenu);
 
-  // ── 관심사 보내기: 토큰이 있으면 GitHub에서 바로 카드를 만들고, 없으면 카톡 등으로 공유 ──
-  const QUICK = ["오늘의 경제 뉴스", "주식·재테크 기초", "부동산", "건강·운동", "요리·맛집", "국내 여행",
-    "IT·전자기기", "자동차", "스포츠", "드라마·영화", "자녀 교육", "취미 생활"];
-  const SUBMIT_STORE = "sureuk.submitted"; // 보낸 시각 (이보다 새 카드가 올라오면 준비 완료)
+  // ── 구독 신청(관심사 보내기): 토큰이 있으면 GitHub에서 바로 만들고, 없으면 카톡 등으로 공유 ──
+  const QUICK = ["오늘의 경제", "주식·재테크 기초", "부동산", "건강·운동", "요리·맛집", "국내 여행",
+    "IT·전자기기", "자동차", "스포츠", "드라마·영화", "자녀 교육", "취미"];
 
   async function dispatch(about, interests) {
     const d = config.dispatch;
     const res = await fetch(`https://api.github.com/repos/${d.repo}/actions/workflows/${d.workflow}/dispatches`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${d.token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
+      headers: { Authorization: `Bearer ${d.token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
       body: JSON.stringify({ ref: "main", inputs: { mode: "onboard", code, about, interests } }),
     });
     if (res.status !== 204) throw new Error(`보내기 실패 (${res.status})`);
   }
 
   function showInterestForm(editing) {
-    who.hidden = true;
+    menuBtn.hidden = true;
     stopWaiting();
-    const draft = store.get(DRAFT_STORE, {});
-    const mine = editing && !pending ? data : null; // 이미 카드가 있으면 지금 관심사로 채운다
     if (code === "me") {
       showPanel(
         el("h1", { class: "panel-title" }, "관심사 고치기"),
-        el("p", { class: "panel-note" }, "만든 사람 카드(me)는 대화창에서 고쳐요."),
-        el("button", { class: "again wide", type: "button", onclick: openFeed }, "카드로 돌아가기"),
+        el("p", { class: "panel-note" }, "만든 사람의 신문(me)은 대화창에서 고쳐요."),
+        el("button", { class: "btn wide", type: "button", onclick: openFeed }, "신문으로 돌아가기"),
       );
       return;
     }
-    const field = (attrs, value) => {
-      const input = el(attrs.rows ? "textarea" : "input", { class: `field${attrs.rows ? " area" : ""}`, ...attrs });
-      input.value = value || "";
-      return input;
-    };
-    const about = field({ type: "text", placeholder: "나를 한 줄로 (예: 50대 직장인, 고3, 취준생)", "aria-label": "한 줄 소개", maxlength: "80" },
-      mine?.person?.about || draft.about);
-    const text = field({
-      rows: "9", "aria-label": "관심사", maxlength: "2000",
+    const draft = store.get(DRAFT_STORE, {});
+    const mine = editing && !pending ? data : null; // 이미 신문이 있으면 지금 관심사로 채운다
+    const about = el("input", {
+      class: "field", type: "text", maxlength: "80", "aria-label": "한 줄 소개",
+      placeholder: "나를 한 줄로 (예: 50대 직장인, 고3, 취준생)",
+    });
+    about.value = mine?.person?.about || draft.about || "";
+    const text = el("textarea", {
+      class: "field area", rows: "9", maxlength: "2000", "aria-label": "관심사",
       placeholder: "예) 요즘 건강 관리랑 걷기 운동에 관심 있어. 주식은 조금 해봤는데 기초부터 알고 싶고, 부동산 뉴스도 궁금해. 주말에 갈 만한 국내 여행지도 알려줘. 광고는 빼줘.",
-    }, mine?.interests || draft.text);
+    });
+    text.value = mine?.interests || draft.text || "";
     const saveDraft = () => store.set(DRAFT_STORE, { about: about.value, text: text.value });
-    [about, text].forEach((f) => f.addEventListener("input", saveDraft));
+    about.addEventListener("input", saveDraft);
+    text.addEventListener("input", saveDraft);
 
-    const chipsRow = el("div", { class: "quick" }, QUICK.map((q) => el("button", {
-      class: "chip-btn", type: "button",
+    const tags = el("div", { class: "quick" }, QUICK.map((q) => el("button", {
+      class: "tag", type: "button",
       onclick: () => {
         text.value = text.value.trim() ? `${text.value.trim()}, ${q}` : q;
         saveDraft();
         text.focus();
       },
-    }, `＋ ${q}`)));
+    }, `+ ${q}`)));
 
     const status = el("p", { class: "panel-note" }, config?.dispatch
-      ? "보내면 몇 분 안에 나만의 카드가 만들어져요."
-      : "보내준 관심사로 다음 업데이트 때 나만의 카드가 만들어져요.");
-    const button = el("button", { class: "again wide", type: "button" }, config?.dispatch ? "보내고 카드 만들기" : "보내기 (카톡 등)");
-    const backLabel = () => (!code ? "이미 받은 코드가 있어요" : editing ? "카드로 돌아가기" : "그동안 주요 뉴스 보기");
-    const back = el("button", { class: "ghost", type: "button", onclick: () => (code ? openFeed() : showCodeEntry()) }, backLabel());
+      ? "보내면 몇 분 안에 나만의 신문이 만들어져요."
+      : "보내준 관심사로 다음 판부터 나만의 신문이 만들어져요.");
+    const submit = el("button", { class: "btn wide", type: "button" }, config?.dispatch ? "내 신문 만들기" : "보내기 (카톡 등)");
+    const backLabel = () => (!code ? "이미 받은 코드가 있어요" : editing ? "신문으로 돌아가기" : "그동안 주요 뉴스 보기");
+    const back = el("button", { class: "link-btn", type: "button", onclick: () => (code ? openFeed() : showCodeEntry()) }, backLabel());
 
-    button.addEventListener("click", async () => {
+    submit.addEventListener("click", async () => {
       if (text.value.trim().length < 5) {
         status.textContent = "관심사를 조금 더 적어주세요.";
         return;
@@ -473,7 +458,7 @@
         back.textContent = backLabel();
       }
       if (config?.dispatch) {
-        button.disabled = true;
+        submit.disabled = true;
         status.textContent = "보내는 중…";
         try {
           await dispatch(about.value.trim(), text.value.trim());
@@ -481,7 +466,7 @@
           store.set(DRAFT_STORE, {});
           showWaiting();
         } catch (e) {
-          button.disabled = false;
+          submit.disabled = false;
           status.textContent = `${e.message}. 잠시 뒤 다시 눌러주세요.`;
         }
         return;
@@ -492,7 +477,7 @@
       try {
         if (navigator.share) {
           await navigator.share({ text: message });
-          status.textContent = "보냈어요! 카드가 준비될 때까지 아래 버튼으로 주요 뉴스를 볼 수 있어요.";
+          status.textContent = "보냈어요! 신문이 준비될 때까지 주요 뉴스를 볼 수 있어요.";
           return;
         }
       } catch (e) {
@@ -508,32 +493,31 @@
     });
 
     showPanel(
-      el("h1", { class: "panel-title" }, editing ? "관심사 고치기" : "관심사를 알려주세요"),
-      el("p", { class: "panel-note" }, "궁금한 걸 편하게 쭉 적어주세요. 자세할수록 좋고, '잘 모른다', '기초부터'라고 쓰면 쉬운 설명 연재도 만들어줘요."),
+      masthead(editing ? "관심사 고치기" : "구독 신청"),
+      el("p", { class: "panel-note" }, "궁금한 걸 편하게 쭉 적어주세요. 자세할수록 좋고, '잘 모른다', '기초부터'라고 쓰면 쉬운 설명 연재도 실어드려요."),
       el("div", { class: "stack" },
         about,
         text,
         el("p", { class: "label" }, "눌러서 추가"),
-        chipsRow,
-        button,
+        tags,
+        submit,
         status,
         back,
       ),
     );
   }
 
-  // ── 카드 기다리기: 보낸 뒤 새 카드 파일이 올라올 때까지 확인 ──
-  let waitTimer = null;
+  // ── 기다리기: 보낸 뒤 새 지면이 올라올 때까지 20초마다 확인 ──
   function stopWaiting() {
     clearInterval(waitTimer);
     waitTimer = null;
   }
 
-  async function cardsReady() {
+  async function ready() {
     const since = store.get(SUBMIT_STORE, null);
     if (!since) return false;
     const fresh = await loadData(code, true).catch(() => null);
-    if (fresh?.cards?.length && fresh.generated_at && new Date(fresh.generated_at) >= new Date(since)) {
+    if (fresh?.cards?.length && new Date(fresh.generated_at) >= new Date(since)) {
       store.set(SUBMIT_STORE, null);
       return true;
     }
@@ -545,7 +529,7 @@
     const started = Date.now();
     waitTimer = setInterval(async () => {
       if (Date.now() - started > 30 * 60 * 1000) return stopWaiting(); // 30분 넘으면 그만
-      if (await cardsReady()) {
+      if (await ready()) {
         stopWaiting();
         onReady();
       }
@@ -553,25 +537,24 @@
   }
 
   function showWaiting() {
-    who.hidden = true;
-    showPanel(
-      el("div", { class: "stack center" },
-        el("div", { class: "spinner", "aria-hidden": "true" }),
-        el("h1", { class: "panel-title" }, "카드를 만들고 있어요"),
-        el("p", { class: "panel-note" }, "보통 5분쯤 걸려요. 이 화면을 닫았다가 나중에 다시 열어도 돼요."),
-        el("button", { class: "ghost", type: "button", onclick: openFeed }, "그동안 주요 뉴스 보기"),
-      ),
-    );
+    menuBtn.hidden = true;
+    showPanel(el("div", { class: "stack center" },
+      masthead("윤전기 가동 중"),
+      el("div", { class: "press", "aria-hidden": "true" }),
+      el("h1", { class: "panel-title" }, "내 신문을 찍고 있어요"),
+      el("p", { class: "panel-note" }, "보통 2~3분 걸려요. 이 화면을 닫았다가 나중에 다시 열어도 돼요."),
+      el("button", { class: "link-btn", type: "button", onclick: openFeed }, "그동안 주요 뉴스 보기"),
+    ));
     startWaiting(openFeed);
   }
 
   function showCodeEntry() {
     const input = el("input", {
-      class: "field center", type: "text", placeholder: "코드", "aria-label": "코드",
+      class: "field", type: "text", placeholder: "코드", "aria-label": "코드",
       autocapitalize: "off", autocomplete: "off", spellcheck: "false",
     });
     showPanel(el("form", {
-      class: "stack center",
+      class: "stack",
       onsubmit: (e) => {
         e.preventDefault();
         const value = input.value.trim().toLowerCase();
@@ -581,15 +564,11 @@
       },
     },
     el("h1", { class: "panel-title" }, "코드로 열기"),
-    el("p", { class: "panel-note" }, "전에 받은 코드를 넣으면 내 카드가 열려요."),
+    el("p", { class: "panel-note" }, "전에 받은 코드를 넣으면 내 신문이 열려요."),
     input,
-    el("button", { class: "again", type: "submit" }, "열기"),
-    el("button", { class: "ghost", type: "button", onclick: () => showInterestForm(false) }, "돌아가기")));
+    el("button", { class: "btn wide", type: "submit" }, "열기"),
+    el("button", { class: "link-btn", type: "button", onclick: () => showInterestForm(false) }, "돌아가기")));
     input.focus();
-  }
-
-  function showMessage(title, text) {
-    showPanel(el("h1", { class: "panel-title" }, title), el("p", { class: "panel-note" }, text));
   }
 
   async function load() {
@@ -597,7 +576,10 @@
     if (await fetchJson("data/headlines.json")) return route();
 
     const envelope = await fetchJson("data/headlines.enc.json");
-    if (!envelope) return showMessage("카드가 아직 없어요", "새 카드가 올라오면 여기에 보여요.");
+    if (!envelope) {
+      showPanel(masthead(), el("p", { class: "panel-note" }, "아직 발행된 지면이 없어요."));
+      return;
+    }
     mode = "enc";
     const saved = store.get(KEY_STORE, null);
     if (saved?.salt === envelope.salt) {

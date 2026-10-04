@@ -3,19 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>스르륵</title>
-  <meta name="description" content="관심사에 맞춘 오늘의 읽을거리">
+  <title>The SLR</title>
+  <meta name="description" content="스르륵 읽는 나만의 신문">
   <meta name="robots" content="noindex, nofollow">
-  <meta name="theme-color" content="#F4F2ED" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#111110" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#FBFAF7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="스르륵">
+  <meta name="apple-mobile-web-app-title" content="The SLR">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
   <link rel="icon" href="icons/icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;500;600;700&family=Noto+Serif+KR:wght@400;600;700;900&family=UnifrakturMaguntia&display=swap">
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -23,17 +24,17 @@
 
   <header class="top">
     <div class="top-row">
-      <span class="wordmark">스르륵</span>
+      <span class="brand">The SLR</span>
       <span class="top-right">
         <span class="counter" id="counter" aria-live="polite"></span>
-        <button class="who" id="who" type="button" hidden aria-label="사람 바꾸기와 관심사"></button>
+        <button class="menu-btn" id="who" type="button" hidden>메뉴</button>
       </span>
     </div>
-    <nav class="chips" id="chips" aria-label="주제 고르기"></nav>
+    <nav class="sections" id="chips" aria-label="섹션"></nav>
   </header>
 
-  <main class="feed" id="feed">
-    <p class="loading">오늘의 카드를 불러오는 중…</p>
+  <main class="paper" id="feed">
+    <p class="loading">오늘 신문을 펼치는 중…</p>
   </main>
 
   <script src="app.js"></script>

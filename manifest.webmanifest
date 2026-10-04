@@ -1,13 +1,13 @@
 {
-  "name": "스르륵",
-  "short_name": "스르륵",
-  "description": "관심사에 맞춘 오늘의 읽을거리 카드",
+  "name": "The SLR",
+  "short_name": "SLR",
+  "description": "스르륵 읽는 나만의 신문",
   "lang": "ko",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#F7F5F0",
-  "theme_color": "#F7F5F0",
+  "background_color": "#FBFAF7",
+  "theme_color": "#FBFAF7",
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
