@@ -15,6 +15,7 @@
   let code = null;
   let data = null; // 지금 보여주는 카드 (내 카드, 또는 준비 중일 때 공용 주요 뉴스)
   let pending = false;
+  let config = null; // 잠근 config: 사이트에서 관심사를 바로 보낼 때 쓰는 GitHub 정보
   let filter = "all";
   let observer = null;
 
@@ -203,7 +204,9 @@
         el("span", { class: "pill" }, `카드 ${cards.length}장`),
         el("span", { class: "pill" }, `약 ${minutes}분`)),
       pending
-        ? el("p", { class: "notice" }, "⏳ 관심사 카드를 준비하고 있어요. 다음 업데이트 때 여기에 내 카드가 생겨요. 그동안 오늘의 주요 뉴스를 먼저 읽어보세요.")
+        ? el("p", { class: "notice" }, store.get(SUBMIT_STORE, null)
+          ? "⏳ 내 카드를 만들고 있어요. 몇 분 뒤 이 화면이 저절로 내 카드로 바뀌어요. 그동안 오늘의 주요 뉴스를 먼저 읽어보세요."
+          : "⏳ 아직 내 카드가 없어요. 위쪽 버튼에서 관심사를 보내면 만들어져요. 그동안 오늘의 주요 뉴스를 읽어보세요.")
         : filter === "all"
           ? el("p", { class: "intro-note" }, `기사 ${s.candidates ?? "?"}개 중에서 골랐고, 광고·협찬 의심 ${s.ads_filtered ?? 0}개는 걸렀어요.`)
           : null,
@@ -291,9 +294,11 @@
     }
   }
 
-  async function loadData(name) {
-    if (mode === "plain") return fetchJson(`data/${name}.json`);
-    const envelope = await fetchJson(`data/${name}.enc.json`);
+  // fresh: 기다리는 중엔 GitHub Pages 캐시를 건너뛰고 새 파일을 확인한다
+  async function loadData(name, fresh = false) {
+    const bust = fresh ? `?t=${Date.now()}` : "";
+    if (mode === "plain") return fetchJson(`data/${name}.json${bust}`);
+    const envelope = await fetchJson(`data/${name}.enc.json${bust}`);
     return envelope ? decrypt(envelope, rawKey) : null;
   }
 
@@ -335,23 +340,28 @@
     return Array.from(bytes, (b) => letters[b % letters.length]).join("");
   }
 
-  function route() {
+  async function route() {
+    config = await loadData("config").catch(() => null); // 사이트에서 바로 보내기용 (없으면 카톡 공유)
     code = store.get(CODE_STORE, null);
     if (code) openFeed();
     else showInterestForm(false);
   }
 
   async function openFeed() {
+    stopWaiting();
     showPanel(el("p", { class: "panel-note" }, "카드를 불러오는 중…"));
-    data = await loadData(code).catch(() => null);
+    const waiting = Boolean(store.get(SUBMIT_STORE, null));
+    data = await loadData(code, waiting).catch(() => null);
     pending = !data?.cards?.length;
     if (pending) data = await loadData("headlines").catch(() => null);
     who.hidden = false;
-    who.textContent = pending ? "⏳ 준비 중 ▾" : `${data.person?.emoji || "🙂"} ${data.person?.name || "나"} ▾`;
+    who.textContent = pending ? "⏳ 준비 중 ▾" : "내 카드 ▾";
+    // 관심사를 보낸 뒤라면 새 카드가 올라오는지 뒤에서 계속 확인한다
+    if (waiting) startWaiting(openFeed);
     if (!data?.cards?.length) {
       showPanel(
         el("h1", { class: "panel-title" }, "카드를 준비하고 있어요"),
-        el("p", { class: "panel-note" }, "다음 업데이트 때 여기에 내 카드가 생겨요."),
+        el("p", { class: "panel-note" }, "조금 뒤에 여기에 내 카드가 생겨요."),
         el("button", { class: "ghost", type: "button", onclick: showMenu }, "관심사 고치기 · 코드 보기"),
       );
       return;
@@ -368,7 +378,7 @@
       autocapitalize: "off", autocomplete: "off", spellcheck: "false",
     });
     showPanel(
-      el("h1", { class: "panel-title" }, pending ? "⏳ 카드 준비 중" : `${data?.person?.emoji || "🙂"} ${data?.person?.name || "나"}`),
+      el("h1", { class: "panel-title" }, pending ? "⏳ 카드 준비 중" : "내 카드"),
       el("div", { class: "stack" },
         el("button", { class: "ghost", type: "button", onclick: () => showInterestForm(true) }, "✏️ 내 관심사 고치기"),
         el("p", { class: "code-line" }, "내 코드 ", el("b", {}, code || "-"), " · 관심사를 보낼 때 같이 가요"),
@@ -390,27 +400,51 @@
   }
   who.addEventListener("click", showMenu);
 
-  // ── 관심사 등록·고치기: 지금은 카톡 등으로 보내면 다음 업데이트 때 반영 ──
+  // ── 관심사 보내기: 토큰이 있으면 GitHub에서 바로 카드를 만들고, 없으면 카톡 등으로 공유 ──
   const QUICK = ["오늘의 경제 뉴스", "주식·재테크 기초", "부동산", "건강·운동", "요리·맛집", "국내 여행",
     "IT·전자기기", "자동차", "스포츠", "드라마·영화", "자녀 교육", "취미 생활"];
+  const SUBMIT_STORE = "sureuk.submitted"; // 보낸 시각 (이보다 새 카드가 올라오면 준비 완료)
+
+  async function dispatch(about, interests) {
+    const d = config.dispatch;
+    const res = await fetch(`https://api.github.com/repos/${d.repo}/actions/workflows/${d.workflow}/dispatches`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${d.token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      body: JSON.stringify({ ref: "main", inputs: { mode: "onboard", code, about, interests } }),
+    });
+    if (res.status !== 204) throw new Error(`보내기 실패 (${res.status})`);
+  }
 
   function showInterestForm(editing) {
     who.hidden = true;
+    stopWaiting();
     const draft = store.get(DRAFT_STORE, {});
     const mine = editing && !pending ? data : null; // 이미 카드가 있으면 지금 관심사로 채운다
+    if (code === "me") {
+      showPanel(
+        el("h1", { class: "panel-title" }, "관심사 고치기"),
+        el("p", { class: "panel-note" }, "만든 사람 카드(me)는 대화창에서 고쳐요."),
+        el("button", { class: "again wide", type: "button", onclick: openFeed }, "카드로 돌아가기"),
+      );
+      return;
+    }
     const field = (attrs, value) => {
       const input = el(attrs.rows ? "textarea" : "input", { class: `field${attrs.rows ? " area" : ""}`, ...attrs });
       input.value = value || "";
       return input;
     };
-    const name = field({ type: "text", placeholder: "이름이나 별명", "aria-label": "이름" }, mine?.person?.name || draft.name);
-    const about = field({ type: "text", placeholder: "나를 한 줄로 (선택, 예: 50대 직장인, 고3)", "aria-label": "한 줄 소개" }, mine?.person?.about || draft.about);
+    const about = field({ type: "text", placeholder: "나를 한 줄로 (예: 50대 직장인, 고3, 취준생)", "aria-label": "한 줄 소개", maxlength: "80" },
+      mine?.person?.about || draft.about);
     const text = field({
-      rows: "8", "aria-label": "관심사",
+      rows: "9", "aria-label": "관심사", maxlength: "2000",
       placeholder: "예) 요즘 건강 관리랑 걷기 운동에 관심 있어. 주식은 조금 해봤는데 기초부터 알고 싶고, 부동산 뉴스도 궁금해. 주말에 갈 만한 국내 여행지도 알려줘. 광고는 빼줘.",
     }, mine?.interests || draft.text);
-    const saveDraft = () => store.set(DRAFT_STORE, { name: name.value, about: about.value, text: text.value });
-    [name, about, text].forEach((f) => f.addEventListener("input", saveDraft));
+    const saveDraft = () => store.set(DRAFT_STORE, { about: about.value, text: text.value });
+    [about, text].forEach((f) => f.addEventListener("input", saveDraft));
 
     const chipsRow = el("div", { class: "quick" }, QUICK.map((q) => el("button", {
       class: "chip-btn", type: "button",
@@ -421,13 +455,16 @@
       },
     }, `＋ ${q}`)));
 
-    const status = el("p", { class: "panel-note" }, "보내준 관심사로 다음 업데이트 때 나만의 카드가 만들어져요.");
-    // 코드가 생기기 전엔 '코드로 열기', 생긴 뒤엔 카드(준비 중이면 주요 뉴스)로
+    const status = el("p", { class: "panel-note" }, config?.dispatch
+      ? "보내면 몇 분 안에 나만의 카드가 만들어져요."
+      : "보내준 관심사로 다음 업데이트 때 나만의 카드가 만들어져요.");
+    const button = el("button", { class: "again wide", type: "button" }, config?.dispatch ? "보내고 카드 만들기" : "보내기 (카톡 등)");
     const backLabel = () => (!code ? "이미 받은 코드가 있어요" : editing ? "카드로 돌아가기" : "그동안 주요 뉴스 보기");
     const back = el("button", { class: "ghost", type: "button", onclick: () => (code ? openFeed() : showCodeEntry()) }, backLabel());
-    const send = async () => {
-      if (!name.value.trim() || !text.value.trim()) {
-        status.textContent = "이름과 관심사를 적어주세요.";
+
+    button.addEventListener("click", async () => {
+      if (text.value.trim().length < 5) {
+        status.textContent = "관심사를 조금 더 적어주세요.";
         return;
       }
       if (!code) {
@@ -435,14 +472,23 @@
         store.set(CODE_STORE, code);
         back.textContent = backLabel();
       }
-      const message = [
-        `[스르륵 관심사${editing ? " 수정" : ""}]`,
-        `코드: ${code}`,
-        `이름: ${name.value.trim()}`,
-        about.value.trim() ? `소개: ${about.value.trim()}` : null,
-        "",
-        text.value.trim(),
-      ].filter((line) => line !== null).join("\n");
+      if (config?.dispatch) {
+        button.disabled = true;
+        status.textContent = "보내는 중…";
+        try {
+          await dispatch(about.value.trim(), text.value.trim());
+          store.set(SUBMIT_STORE, new Date().toISOString());
+          store.set(DRAFT_STORE, {});
+          showWaiting();
+        } catch (e) {
+          button.disabled = false;
+          status.textContent = `${e.message}. 잠시 뒤 다시 눌러주세요.`;
+        }
+        return;
+      }
+      const message = [`[스르륵 관심사${editing ? " 수정" : ""}]`, `코드: ${code}`,
+        about.value.trim() ? `소개: ${about.value.trim()}` : null, "", text.value.trim()]
+        .filter((line) => line !== null).join("\n");
       try {
         if (navigator.share) {
           await navigator.share({ text: message });
@@ -459,22 +505,64 @@
         status.textContent = "아래 내용을 길게 눌러 복사해서 보내주세요.";
         text.value = message;
       }
-    };
+    });
 
     showPanel(
       el("h1", { class: "panel-title" }, editing ? "관심사 고치기" : "관심사를 알려주세요"),
-      el("p", { class: "panel-note" }, "궁금한 걸 편하게 적어주세요. 자세할수록 좋고, '잘 모른다', '기초부터'라고 쓰면 쉬운 설명 연재도 만들어줘요."),
+      el("p", { class: "panel-note" }, "궁금한 걸 편하게 쭉 적어주세요. 자세할수록 좋고, '잘 모른다', '기초부터'라고 쓰면 쉬운 설명 연재도 만들어줘요."),
       el("div", { class: "stack" },
-        name,
         about,
         text,
         el("p", { class: "label" }, "눌러서 추가"),
         chipsRow,
-        el("button", { class: "again wide", type: "button", onclick: send }, "보내기 (카톡 등)"),
+        button,
         status,
         back,
       ),
     );
+  }
+
+  // ── 카드 기다리기: 보낸 뒤 새 카드 파일이 올라올 때까지 확인 ──
+  let waitTimer = null;
+  function stopWaiting() {
+    clearInterval(waitTimer);
+    waitTimer = null;
+  }
+
+  async function cardsReady() {
+    const since = store.get(SUBMIT_STORE, null);
+    if (!since) return false;
+    const fresh = await loadData(code, true).catch(() => null);
+    if (fresh?.cards?.length && fresh.generated_at && new Date(fresh.generated_at) >= new Date(since)) {
+      store.set(SUBMIT_STORE, null);
+      return true;
+    }
+    return false;
+  }
+
+  function startWaiting(onReady) {
+    stopWaiting();
+    const started = Date.now();
+    waitTimer = setInterval(async () => {
+      if (Date.now() - started > 30 * 60 * 1000) return stopWaiting(); // 30분 넘으면 그만
+      if (await cardsReady()) {
+        stopWaiting();
+        onReady();
+      }
+    }, 20000);
+  }
+
+  function showWaiting() {
+    who.hidden = true;
+    showPanel(
+      el("div", { class: "stack center" },
+        el("div", { class: "spinner", "aria-hidden": "true" }),
+        el("h1", { class: "panel-title" }, "카드를 만들고 있어요"),
+        el("p", { class: "panel-note" }, "보통 5분쯤 걸려요. 이 화면을 닫았다가 나중에 다시 열어도 돼요."),
+        el("button", { class: "ghost", type: "button", onclick: openFeed }, "그동안 주요 뉴스 보기"),
+      ),
+    );
+    startWaiting(openFeed);
   }
 
   function showCodeEntry() {
