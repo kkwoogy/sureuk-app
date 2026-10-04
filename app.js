@@ -600,7 +600,7 @@
     const done = store.get(REFRESHED_STORE, null) === todayLocal();
     const note = el("p", { class: "code-line" }, done
       ? "오늘 새 판은 이미 찍었어요. 다음 판은 내일 찍을 수 있어요."
-      : "모두의 신문을 최신 뉴스로 새로 만들어요 · 하루 한 번");
+      : "모두의 신문을 최신 뉴스로 새로 만들어요 · 하루 한 번 · 지금 두 사람 기준 한 번에 약 2천 원");
     const button = el("button", {
       class: "menu-item", type: "button", disabled: done,
       onclick: async () => {
@@ -616,7 +616,7 @@
           note.textContent = `${e.message}. 잠시 뒤 다시 눌러주세요.`;
         }
       },
-    }, "오늘 새 판 찍기");
+    }, "지금 새 판 찍기");
     return [button, note];
   }
 
