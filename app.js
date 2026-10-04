@@ -568,23 +568,29 @@
     stopWaiting();
     const started = Date.now();
     waitTimer = setInterval(async () => {
-      if (Date.now() - started > 30 * 60 * 1000) return stopWaiting(); // 30분 넘으면 그만
+      // 천천히 찍기는 한 시간 넘게 걸릴 수도 있어서 2시간까지 30초마다 확인 (앱을 다시 열면 또 확인)
+      if (Date.now() - started > 2 * 60 * 60 * 1000) return stopWaiting();
       if (await ready()) {
         stopWaiting();
         onReady();
       }
-    }, 20000);
+    }, 30000);
   }
 
-  function showWaiting(refresh) {
+  // kind: "now"·"slow"(모두 새로고침) 또는 없음(새 구독자 한 사람)
+  function showWaiting(kind) {
     menuBtn.hidden = true;
+    const refresh = Boolean(kind);
+    const note = kind === "slow"
+      ? "반값으로 천천히 찍는 중이에요. 보통 1시간 안에 나와요. 화면을 닫아두고 나중에 열면 새 판이 기다리고 있어요."
+      : refresh
+        ? "모두의 신문을 새로 만드느라 5분쯤 걸려요. 화면을 닫았다가 나중에 열어도 돼요."
+        : "보통 2~3분 걸려요. 이 화면을 닫았다가 나중에 다시 열어도 돼요.";
     showPanel(el("div", { class: "stack center" },
       masthead("윤전기 가동 중"),
       el("div", { class: "press", "aria-hidden": "true" }),
       el("h1", { class: "panel-title" }, refresh ? "오늘 새 판을 찍고 있어요" : "내 신문을 찍고 있어요"),
-      el("p", { class: "panel-note" }, refresh
-        ? "모두의 신문을 새로 만드느라 5분쯤 걸려요. 화면을 닫았다가 나중에 열어도 돼요."
-        : "보통 2~3분 걸려요. 이 화면을 닫았다가 나중에 다시 열어도 돼요."),
+      el("p", { class: "panel-note" }, note),
       refresh ? null : linkBox(),
       el("button", { class: "link-btn", type: "button", onclick: openFeed }, refresh ? "그동안 지난 판 보기" : "그동안 주요 뉴스 보기"),
     ));
@@ -600,24 +606,27 @@
     const done = store.get(REFRESHED_STORE, null) === todayLocal();
     const note = el("p", { class: "code-line" }, done
       ? "오늘 새 판은 이미 찍었어요. 다음 판은 내일 찍을 수 있어요."
-      : "모두의 신문을 최신 뉴스로 새로 만들어요 · 하루 한 번 · 지금 두 사람 기준 한 번에 약 2천 원");
-    const button = el("button", {
-      class: "menu-item", type: "button", disabled: done,
-      onclick: async () => {
-        button.disabled = true;
-        note.textContent = "보내는 중…";
-        try {
-          await runWorkflow({ mode: "refresh" });
-          store.set(REFRESHED_STORE, todayLocal());
-          store.set(SUBMIT_STORE, new Date().toISOString());
-          showWaiting(true);
-        } catch (e) {
-          button.disabled = false;
-          note.textContent = `${e.message}. 잠시 뒤 다시 눌러주세요.`;
-        }
-      },
-    }, "지금 새 판 찍기");
-    return [button, note];
+      : "모두의 신문을 최신 뉴스로 새로 만들어요 · 하루 한 번 · 금액은 지금 두 사람 기준");
+    const press = (speed) => async () => {
+      buttons.forEach((b) => (b.disabled = true));
+      note.textContent = "보내는 중…";
+      try {
+        await runWorkflow({ mode: "refresh", speed });
+        store.set(REFRESHED_STORE, todayLocal());
+        store.set(SUBMIT_STORE, new Date().toISOString());
+        showWaiting(speed);
+      } catch (e) {
+        buttons.forEach((b) => (b.disabled = false));
+        note.textContent = `${e.message}. 잠시 뒤 다시 눌러주세요.`;
+      }
+    };
+    const buttons = [
+      el("button", { class: "menu-item", type: "button", disabled: done, onclick: press("now") },
+        "지금 바로 찍기", el("span", { class: "menu-sub" }, "약 2천 원 · 5분 안팎")),
+      el("button", { class: "menu-item", type: "button", disabled: done, onclick: press("slow") },
+        "천천히 찍기", el("span", { class: "menu-sub" }, "약 1천 원 · 보통 1시간 안 · 자기 전에 눌러두기 좋아요")),
+    ];
+    return [...buttons, note];
   }
 
   function showCodeEntry() {

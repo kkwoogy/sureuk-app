@@ -236,6 +236,7 @@ button { font: inherit; color: inherit; }
   background: none; border: none; border-bottom: 1px solid var(--rule); font-family: var(--serif); font-size: 17px;
 }
 .menu-item:disabled { color: var(--muted); cursor: default; }
+.menu-sub { display: block; margin-top: 3px; font-family: var(--sans); font-size: 12.5px; color: var(--muted); }
 .menu-list .code-line { margin: -8px 0 0; padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
 .code-line { margin: 16px 0 0; font-family: var(--sans); font-size: 13px; color: var(--muted); }
 .code-line b { color: var(--ink); letter-spacing: .12em; }
