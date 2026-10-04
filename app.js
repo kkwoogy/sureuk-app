@@ -335,11 +335,51 @@
     return Array.from(crypto.getRandomValues(new Uint8Array(5)), (b) => letters[b % letters.length]).join("");
   }
 
+  // 코드는 기기 저장소와 주소(?u=코드) 둘 다에 둔다. 카톡 안 브라우저·사파리·홈 화면 앱은 저장소가 따로라서
+  // 저장소만 믿으면 나갔다 들어올 때 잊어버린다. 주소에 있으면 북마크·홈 화면 추가로 계속 내 신문이 열린다.
+  const validCode = (c) => /^[a-z0-9]{2,12}$/.test(c || "");
+  const myLink = () => `${location.origin}${location.pathname}?u=${code}`;
+
+  function rememberCode(value) {
+    code = value;
+    store.set(CODE_STORE, value);
+    if (new URLSearchParams(location.search).get("u") !== value) history.replaceState(null, "", `?u=${value}`);
+  }
+
+  function linkBox() {
+    if (!code) return null;
+    const status = el("p", { class: "code-line" }, "카톡 '나에게 보내기'나 홈 화면 추가로 저장해 두면, 어디서 열어도 내 신문이 바로 열려요.");
+    return el("div", { class: "link-box" },
+      el("p", { class: "label" }, "내 신문 주소"),
+      el("p", { class: "my-link" }, myLink()),
+      el("button", {
+        class: "btn", type: "button",
+        onclick: async () => {
+          try {
+            if (navigator.share) return void (await navigator.share({ title: "The SLR", url: myLink() }));
+          } catch (e) {
+            if (e?.name === "AbortError") return;
+          }
+          try {
+            await navigator.clipboard.writeText(myLink());
+            status.textContent = "주소를 복사했어요.";
+          } catch {
+            status.textContent = "위 주소를 길게 눌러 복사해 주세요.";
+          }
+        },
+      }, "주소 보내기 · 복사"),
+      status);
+  }
+
   async function route() {
     config = await loadData("config").catch(() => null);
-    code = store.get(CODE_STORE, null);
-    if (code) openFeed();
-    else showInterestForm(false);
+    const saved = store.get(CODE_STORE, null);
+    if (validCode(saved)) {
+      rememberCode(saved);
+      openFeed();
+    } else {
+      showInterestForm(false);
+    }
   }
 
   async function openFeed() {
@@ -375,15 +415,15 @@
         el("button", { class: "menu-item", type: "button", onclick: () => showInterestForm(true) }, "관심사 고치기"),
       ),
       el("p", { class: "code-line" }, "내 코드 ", el("b", {}, code || "—")),
+      linkBox(),
       el("p", { class: "label" }, "다른 기기에서 쓰던 코드로 열기"),
       el("form", {
         class: "row",
         onsubmit: (e) => {
           e.preventDefault();
           const value = codeInput.value.trim().toLowerCase();
-          if (!value) return;
-          store.set(CODE_STORE, value);
-          code = value;
+          if (!validCode(value)) return;
+          rememberCode(value);
           openFeed();
         },
       }, codeInput, el("button", { class: "btn", type: "submit" }, "열기")),
@@ -454,8 +494,7 @@
         return;
       }
       if (!code) {
-        code = newCode();
-        store.set(CODE_STORE, code);
+        rememberCode(newCode());
         back.textContent = backLabel();
       }
       if (config?.dispatch) {
@@ -546,6 +585,7 @@
       el("p", { class: "panel-note" }, refresh
         ? "모두의 신문을 새로 만드느라 5분쯤 걸려요. 화면을 닫았다가 나중에 열어도 돼요."
         : "보통 2~3분 걸려요. 이 화면을 닫았다가 나중에 다시 열어도 돼요."),
+      refresh ? null : linkBox(),
       el("button", { class: "link-btn", type: "button", onclick: openFeed }, refresh ? "그동안 지난 판 보기" : "그동안 주요 뉴스 보기"),
     ));
     startWaiting(openFeed);
@@ -590,8 +630,8 @@
       onsubmit: (e) => {
         e.preventDefault();
         const value = input.value.trim().toLowerCase();
-        if (!value) return;
-        store.set(CODE_STORE, value);
+        if (!validCode(value)) return;
+        rememberCode(value);
         route();
       },
     },
@@ -623,6 +663,10 @@
     }
     showUnlock(envelope);
   }
+
+  // 내 신문 주소(?u=코드)로 들어왔으면 그 코드를 이 기기에 기억한다
+  const codeFromUrl = new URLSearchParams(location.search).get("u");
+  if (validCode(codeFromUrl)) store.set(CODE_STORE, codeFromUrl);
 
   // 홈 화면 앱으로 쓸 때 오프라인에서도 열리게
   if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {

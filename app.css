@@ -239,6 +239,14 @@ button { font: inherit; color: inherit; }
 .menu-list .code-line { margin: -8px 0 0; padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
 .code-line { margin: 16px 0 0; font-family: var(--sans); font-size: 13px; color: var(--muted); }
 .code-line b { color: var(--ink); letter-spacing: .12em; }
+.link-box {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
+  margin: 22px 0 0; padding: 16px 0; border-top: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule);
+  text-align: left; width: 100%;
+}
+.link-box .label { margin: 0; }
+.my-link { margin: 0; font-family: var(--sans); font-size: 14px; font-weight: 600; word-break: break-all; }
+.link-box .code-line { margin: 0; }
 .row { display: flex; gap: 10px; align-items: flex-end; }
 .row .field { flex: 1; min-width: 0; }
 

@@ -3,7 +3,6 @@
   "short_name": "SLR",
   "description": "스르륵 읽는 나만의 신문",
   "lang": "ko",
-  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#FBFAF7",
