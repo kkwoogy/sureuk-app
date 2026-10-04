@@ -371,6 +371,7 @@
       el("h1", { class: "panel-title" }, "메뉴"),
       el("div", { class: "menu-list" },
         el("button", { class: "menu-item", type: "button", onclick: openFeed }, pending ? "주요 뉴스로 돌아가기" : "내 신문으로 돌아가기"),
+        refreshItem(),
         el("button", { class: "menu-item", type: "button", onclick: () => showInterestForm(true) }, "관심사 고치기"),
       ),
       el("p", { class: "code-line" }, "내 코드 ", el("b", {}, code || "—")),
@@ -394,12 +395,12 @@
   const QUICK = ["오늘의 경제", "주식·재테크 기초", "부동산", "건강·운동", "요리·맛집", "국내 여행",
     "IT·전자기기", "자동차", "스포츠", "드라마·영화", "자녀 교육", "취미"];
 
-  async function dispatch(about, interests) {
+  async function runWorkflow(inputs) {
     const d = config.dispatch;
     const res = await fetch(`https://api.github.com/repos/${d.repo}/actions/workflows/${d.workflow}/dispatches`, {
       method: "POST",
       headers: { Authorization: `Bearer ${d.token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
-      body: JSON.stringify({ ref: "main", inputs: { mode: "onboard", code, about, interests } }),
+      body: JSON.stringify({ ref: "main", inputs }),
     });
     if (res.status !== 204) throw new Error(`보내기 실패 (${res.status})`);
   }
@@ -461,10 +462,10 @@
         submit.disabled = true;
         status.textContent = "보내는 중…";
         try {
-          await dispatch(about.value.trim(), text.value.trim());
+          await runWorkflow({ mode: "onboard", code, about: about.value.trim(), interests: text.value.trim() });
           store.set(SUBMIT_STORE, new Date().toISOString());
           store.set(DRAFT_STORE, {});
-          showWaiting();
+          showWaiting(false);
         } catch (e) {
           submit.disabled = false;
           status.textContent = `${e.message}. 잠시 뒤 다시 눌러주세요.`;
@@ -536,16 +537,47 @@
     }, 20000);
   }
 
-  function showWaiting() {
+  function showWaiting(refresh) {
     menuBtn.hidden = true;
     showPanel(el("div", { class: "stack center" },
       masthead("윤전기 가동 중"),
       el("div", { class: "press", "aria-hidden": "true" }),
-      el("h1", { class: "panel-title" }, "내 신문을 찍고 있어요"),
-      el("p", { class: "panel-note" }, "보통 2~3분 걸려요. 이 화면을 닫았다가 나중에 다시 열어도 돼요."),
-      el("button", { class: "link-btn", type: "button", onclick: openFeed }, "그동안 주요 뉴스 보기"),
+      el("h1", { class: "panel-title" }, refresh ? "오늘 새 판을 찍고 있어요" : "내 신문을 찍고 있어요"),
+      el("p", { class: "panel-note" }, refresh
+        ? "모두의 신문을 새로 만드느라 5분쯤 걸려요. 화면을 닫았다가 나중에 열어도 돼요."
+        : "보통 2~3분 걸려요. 이 화면을 닫았다가 나중에 다시 열어도 돼요."),
+      el("button", { class: "link-btn", type: "button", onclick: openFeed }, refresh ? "그동안 지난 판 보기" : "그동안 주요 뉴스 보기"),
     ));
     startWaiting(openFeed);
+  }
+
+  // ── 새 판 찍기 (만든 사람만, 하루 한 번 — 서버에서도 tools/refresh_gate.py가 막는다) ──
+  const REFRESHED_STORE = "sureuk.refreshed";
+  const todayLocal = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD
+
+  function refreshItem() {
+    if (code !== "me" || !config?.dispatch) return null;
+    const done = store.get(REFRESHED_STORE, null) === todayLocal();
+    const note = el("p", { class: "code-line" }, done
+      ? "오늘 새 판은 이미 찍었어요. 다음 판은 내일 찍을 수 있어요."
+      : "모두의 신문을 최신 뉴스로 새로 만들어요 · 하루 한 번");
+    const button = el("button", {
+      class: "menu-item", type: "button", disabled: done,
+      onclick: async () => {
+        button.disabled = true;
+        note.textContent = "보내는 중…";
+        try {
+          await runWorkflow({ mode: "refresh" });
+          store.set(REFRESHED_STORE, todayLocal());
+          store.set(SUBMIT_STORE, new Date().toISOString());
+          showWaiting(true);
+        } catch (e) {
+          button.disabled = false;
+          note.textContent = `${e.message}. 잠시 뒤 다시 눌러주세요.`;
+        }
+      },
+    }, "오늘 새 판 찍기");
+    return [button, note];
   }
 
   function showCodeEntry() {
