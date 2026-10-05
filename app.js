@@ -200,6 +200,7 @@
           ? "지금 내 신문을 찍고 있어요. 몇 분 뒤 이 지면이 저절로 내 신문으로 바뀌어요. 그동안 오늘의 주요 뉴스를 먼저 읽어보세요."
           : "아직 내 신문이 없어요. 위 메뉴에서 관심사를 보내면 만들어져요. 그동안 오늘의 주요 뉴스를 읽어보세요.")
         : el("p", { class: "edition-note" }, `기사 ${s.candidates ?? "?"}건을 살펴 골랐고, 광고·협찬 의심 ${s.ads_filtered ?? 0}건은 걸렀습니다.`),
+      ownerStatus(),
     );
   }
 
@@ -598,21 +599,44 @@
   }
 
   // ── 새 판 찍기 (만든 사람만, 하루 한 번 — 서버에서도 tools/refresh_gate.py가 막는다) ──
-  const REFRESHED_STORE = "sureuk.refreshed";
-  const todayLocal = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD
+  // 상태는 기기에 적어두지 않고 GitHub 실행 기록에서 매번 확인한다 (실패·진행 중·완료를 그대로 보여주려고)
+  const dayOf = (iso) => new Date(iso).toLocaleDateString("sv-SE"); // 이 기기 날짜 YYYY-MM-DD
+  const clock = (iso) => new Date(iso).toLocaleTimeString("ko-KR", { hour: "numeric", minute: "2-digit" });
+
+  async function refreshRuns() {
+    const d = config?.dispatch;
+    if (!d) return [];
+    try {
+      const res = await fetch(`https://api.github.com/repos/${d.repo}/actions/workflows/${d.workflow}/runs?per_page=15`, {
+        headers: { Authorization: `Bearer ${d.token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+        cache: "no-store",
+      });
+      if (!res.ok) return [];
+      return ((await res.json()).workflow_runs || []).filter((r) => (r.display_title || "").startsWith("refresh"));
+    } catch {
+      return [];
+    }
+  }
+
+  function describeRun(run) {
+    const slow = run.display_title.includes("slow");
+    const speed = slow ? "천천히" : "바로";
+    if (run.status !== "completed") {
+      const mins = Math.max(1, Math.round((Date.now() - new Date(run.run_started_at || run.created_at)) / 60000));
+      return { state: "running", text: `새 판 찍는 중 · ${speed} · ${mins}분째${slow ? " (보통 1시간 안)" : " (5분 안팎)"}` };
+    }
+    if (run.conclusion === "success") return { state: "done", text: `${clock(run.created_at)}에 ${speed} 찍은 새 판` };
+    return { state: "failed", text: `${clock(run.created_at)}에 누른 새 판 찍기가 실패했어요` };
+  }
 
   function refreshItem() {
     if (code !== "me" || !config?.dispatch) return null;
-    const done = store.get(REFRESHED_STORE, null) === todayLocal();
-    const note = el("p", { class: "code-line" }, done
-      ? "오늘 새 판은 이미 찍었어요. 다음 판은 내일 찍을 수 있어요."
-      : "모두의 신문을 최신 뉴스로 새로 만들어요 · 하루 한 번 · 금액은 지금 두 사람 기준");
+    const note = el("p", { class: "code-line" }, "새 판 상태를 확인하는 중…");
     const press = (speed) => async () => {
       buttons.forEach((b) => (b.disabled = true));
       note.textContent = "보내는 중…";
       try {
         await runWorkflow({ mode: "refresh", speed });
-        store.set(REFRESHED_STORE, todayLocal());
         store.set(SUBMIT_STORE, new Date().toISOString());
         showWaiting(speed);
       } catch (e) {
@@ -621,12 +645,52 @@
       }
     };
     const buttons = [
-      el("button", { class: "menu-item", type: "button", disabled: done, onclick: press("now") },
+      el("button", { class: "menu-item", type: "button", disabled: true, onclick: press("now") },
         "지금 바로 찍기", el("span", { class: "menu-sub" }, "약 2천 원 · 5분 안팎")),
-      el("button", { class: "menu-item", type: "button", disabled: done, onclick: press("slow") },
+      el("button", { class: "menu-item", type: "button", disabled: true, onclick: press("slow") },
         "천천히 찍기", el("span", { class: "menu-sub" }, "약 1천 원 · 보통 1시간 안 · 자기 전에 눌러두기 좋아요")),
     ];
+    (async () => {
+      const runs = await refreshRuns();
+      const last = runs[0] && describeRun(runs[0]);
+      if (last?.state === "running") {
+        note.textContent = `${last.text}. 다 되면 신문이 저절로 바뀌니 다시 누르지 않아도 돼요.`;
+        return; // 버튼은 잠근 채로
+      }
+      const doneToday = runs.find((r) => r.conclusion === "success" && dayOf(r.created_at) === dayOf(new Date()));
+      if (doneToday) {
+        note.textContent = `오늘 새 판은 ${clock(doneToday.created_at)}에 찍었어요 · 다음 판은 내일`;
+        return;
+      }
+      buttons.forEach((b) => (b.disabled = false));
+      const base = "나와 테스터 모두의 신문을 함께 새로 만들어요 · 하루 한 번 · 금액은 지금 두 사람 기준";
+      note.textContent = last?.state === "failed" ? `${last.text}. 다시 눌러주세요 · ${base}` : base;
+    })();
     return [...buttons, note];
+  }
+
+  // 지면 위쪽 한 줄: 이번 판 정보, 또는 지금 찍는 중·실패 (만든 사람만)
+  function ownerStatus() {
+    if (code !== "me" || !config?.dispatch || pending) return null;
+    const ed = data.edition;
+    const line = el("p", { class: "edition-status" },
+      ed?.people && !ed.partial ? `이번 판: ${ed.people}명의 신문을 함께 찍었어요${ed.batch ? " · 천천히(반값)" : ""}` : "");
+    (async () => {
+      const runs = await refreshRuns();
+      const last = runs[0] && describeRun(runs[0]);
+      if (last?.state === "running") {
+        line.textContent = `${last.text} — 다 되면 이 지면이 저절로 바뀌어요`;
+        line.className = "edition-status live";
+        if (!store.get(SUBMIT_STORE, null)) store.set(SUBMIT_STORE, runs[0].created_at); // 다른 기기에서 눌렀어도
+        if (!waitTimer) startWaiting(openFeed);
+      } else if (last?.state === "failed" && new Date(runs[0].created_at) > new Date(data.generated_at)) {
+        line.textContent = `${last.text}. 메뉴에서 다시 찍을 수 있어요.`;
+        line.className = "edition-status warn";
+        store.set(SUBMIT_STORE, null);
+        stopWaiting();
+      }
+    })();
+    return line;
   }
 
   function showCodeEntry() {
